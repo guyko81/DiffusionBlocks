@@ -10,6 +10,10 @@ from datasets import load_dataset, DatasetDict
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 
+def _to_rgb(image):
+    return image.convert("RGB")
+
+
 def transforms(examples, transform):
     examples["pixel_values"] = [transform(image) for image in examples["image"]]
     return {
@@ -38,14 +42,14 @@ class ImageDataModule(L.LightningDataModule):
         self.num_workers = num_workers if num_workers is not None else os.cpu_count()
         self.collate_fn = None
         train_transforms = [
-            T.Lambda(lambda x: x.convert("RGB")),
+            T.Lambda(_to_rgb),
             T.RandomResizedCrop(self.image_size),
             T.RandomHorizontalFlip(),
         ]
         if add_rand_aug:
             train_transforms.extend([T.RandAugment()])
         val_transformers = [
-            T.Lambda(lambda x: x.convert("RGB")),
+            T.Lambda(_to_rgb),
             T.Resize(self.image_size),
             T.CenterCrop(self.image_size),
         ]
@@ -131,7 +135,7 @@ class CIFAR100DataModule(ImageDataModule):
         self.test_key = "test"
         # ref: https://github.com/s-chh/PyTorch-Scratch-Vision-Transformer-ViT/blob/main/data_loader.py#L62
         train_transforms = [
-            T.Lambda(lambda x: x.convert("RGB")),
+            T.Lambda(_to_rgb),
             T.Resize([self.image_size, self.image_size]),
             T.RandomCrop(self.image_size, padding=4),
             T.RandomHorizontalFlip(),
@@ -139,7 +143,7 @@ class CIFAR100DataModule(ImageDataModule):
         if add_rand_aug:
             train_transforms.extend([T.RandAugment()])
         val_transforms = [
-            T.Lambda(lambda x: x.convert("RGB")),
+            T.Lambda(_to_rgb),
             T.Resize([self.image_size, self.image_size]),
             T.CenterCrop(self.image_size),
         ]
@@ -169,14 +173,14 @@ class TinyImageNetDataModule(ImageDataModule):
         self.val_key = "valid"
         self.test_key = "valid"
         train_transforms = [
-            T.Lambda(lambda x: x.convert("RGB")),
+            T.Lambda(_to_rgb),
             T.RandomResizedCrop(self.image_size),
             T.RandomHorizontalFlip(),
         ]
         if add_rand_aug:
             train_transforms.extend([T.RandAugment()])
         val_transforms = [
-            T.Lambda(lambda x: x.convert("RGB")),
+            T.Lambda(_to_rgb),
             T.Resize(self.image_size),
             T.CenterCrop(self.image_size),
         ]
