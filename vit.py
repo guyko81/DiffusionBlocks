@@ -824,7 +824,7 @@ def load_vit(image_size: int, num_labels: int, is_dblock: bool = False, **kwargs
     if image_size == 32:
         # CIFAR
         kwargs["patch_size"] = 4
-        kwargs["num_hidden_layers"] = 12
+        kwargs.setdefault("num_hidden_layers", 12)  # caller may override (e.g. small baselines)
         kwargs["hidden_size"] = 128
         kwargs["num_attention_heads"] = 4
         kwargs["attention_probs_dropout_prob"] = 0.1
@@ -832,7 +832,7 @@ def load_vit(image_size: int, num_labels: int, is_dblock: bool = False, **kwargs
     elif image_size == 64:
         # Tiny ImageNet
         kwargs["patch_size"] = 4
-        kwargs["num_hidden_layers"] = 12
+        kwargs.setdefault("num_hidden_layers", 12)  # caller may override (e.g. small baselines)
         kwargs["hidden_size"] = 768
         kwargs["num_attention_heads"] = 12
         kwargs["attention_probs_dropout_prob"] = 0.1

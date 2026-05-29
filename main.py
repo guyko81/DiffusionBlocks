@@ -117,7 +117,20 @@ if __name__ == "__main__":
         "--postfix", type=str, default="", help="postfix for the experiment name"
     )
     # dblock
+    parser.add_argument(
+        "--num_hidden_layers",
+        type=int,
+        default=None,
+        help="override ViT depth (default per-dataset, 12 for CIFAR). "
+        "Must be divisible by --num_blocks. Used for small from-scratch baselines.",
+    )
     parser.add_argument("--num_blocks", type=int, default=3)
+    parser.add_argument(
+        "--weight_tied",
+        action="store_true",
+        help="looped/recurrent-depth: share one block of --num_hidden_layers layers "
+        "across all --num_blocks iterations (num_blocks becomes the loop count K).",
+    )
     parser.add_argument("--gamma", type=float, default=0.05)
     parser.add_argument("--num_inference_steps", type=int, default=None)
     parser.add_argument("--cfg_scale", type=float, default=0.0)

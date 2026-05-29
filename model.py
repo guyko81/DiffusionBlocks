@@ -40,8 +40,19 @@ class ViTModel(L.LightningModule):
         self.test_metrics = self.valid_metrics.clone(prefix="test/")
         self.save_hyperparameters(args)
 
+    def _vit_overrides(self):
+        # let an optional --num_hidden_layers shrink the model (small baselines);
+        # omitted entirely when None so vit.py's per-dataset default applies.
+        extra = {}
+        depth = getattr(self.args, "num_hidden_layers", None)
+        if depth is not None:
+            extra["num_hidden_layers"] = depth
+        return extra
+
     def configure_model(self):
-        self.model = load_vit(image_size=self.image_size, num_labels=self.num_labels)
+        self.model = load_vit(
+            image_size=self.image_size, num_labels=self.num_labels, **self._vit_overrides()
+        )
         print(self.model)
         if self.args.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
@@ -136,7 +147,10 @@ class ViTDBlockModel(ViTModel):
 
     def configure_model(self):
         self.model = load_vit(
-            image_size=self.image_size, num_labels=self.num_labels, is_dblock=True
+            image_size=self.image_size,
+            num_labels=self.num_labels,
+            is_dblock=True,
+            **self._vit_overrides(),
         )
         print(self.model)
 
@@ -206,11 +220,19 @@ class ViTDBlockModel(ViTModel):
         c_noise = 0.25 * sigma.log()
 
         if self.layer_assignment is None:
-            split_size = self.model.config.num_hidden_layers // self.args.num_blocks
-            self.layer_assignment = [
-                list(range(i * split_size, (i + 1) * split_size))
-                for i in range(self.args.num_blocks)
-            ]
+            if getattr(self.args, "weight_tied", False):
+                # Looped / recurrent-depth: a single shared block of all U layers
+                # is reused at every iteration. block_idx selects the sigma-range
+                # (noise-level conditioning via AdaLN), NOT a distinct layer slice,
+                # so num_blocks == loop count K and is decoupled from depth U.
+                all_layers = list(range(self.model.config.num_hidden_layers))
+                self.layer_assignment = [all_layers for _ in range(self.args.num_blocks)]
+            else:
+                split_size = self.model.config.num_hidden_layers // self.args.num_blocks
+                self.layer_assignment = [
+                    list(range(i * split_size, (i + 1) * split_size))
+                    for i in range(self.args.num_blocks)
+                ]
         outputs = self.model.forward_block(
             layer_indices=self.layer_assignment[block_idx],
             pixel_values=x,
