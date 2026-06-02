@@ -1,5 +1,10 @@
 """
 DiffusionBlocks causal LM with looped/weight-tied transformer + MLA + optional Engram.
+
+Architecture follows the original DiffusionBlocks paper:
+  - Clean context (input tokens) and noisy target (next-token embeddings)
+    occupy SEPARATE positions in the sequence, mirroring CLS-vs-patches in ViT.
+  - The model denoises the target positions while attending to clean context.
 """
 
 import math
@@ -25,9 +30,8 @@ from dblock_modules import get_block_sigmas, get_discrete_sigmas
 class DBlockLM(L.LightningModule):
     """
     Looped DiffusionBlocks language model.
-    - Training: per-iteration independent denoiser (random block per step)
-    - Inference: Euler ODE through K iterations
-    - Target: token_embedding(next_token) at each position
+    Training: interleaved clean-context / noisy-target tokens, per-block denoiser.
+    Inference: Euler ODE through K iterations.
     """
 
     def __init__(self, config: LMConfig, lr: float = 3e-4, weight_decay: float = 0.1,
@@ -45,7 +49,6 @@ class DBlockLM(L.LightningModule):
         self.model = CausalTransformer(config, gradient_checkpointing=gradient_checkpointing)
         self.engram = EngramMemory(config) if config.engram_enabled else None
 
-        # DiffusionBlocks sigma schedule
         self.block_sigmas = get_block_sigmas(config.num_blocks)
         sigmas = get_discrete_sigmas(config.num_blocks, dblock=True)
         self.register_buffer("sigmas", sigmas.float())
@@ -54,7 +57,6 @@ class DBlockLM(L.LightningModule):
         self.gamma = config.gamma
 
     def get_sigmas(self, n_samples: int, p_mean: float = -1.2, p_std: float = 1.2):
-        """Sample sigma from a random block's range (same logic as model.py)."""
         block_idx = random.randint(0, self.config.num_blocks - 1)
         sigma_min_b = self.block_sigmas[block_idx]
         sigma_max_b = self.block_sigmas[block_idx + 1]
@@ -72,16 +74,7 @@ class DBlockLM(L.LightningModule):
         sigma = np.exp(p_mean + p_std * norm.ppf(u))
         return torch.from_numpy(sigma).float(), block_idx
 
-    def estimate_block_idx(self, sigma: torch.Tensor) -> int:
-        """Find which block a sigma value belongs to."""
-        s = sigma[0].item()
-        for i in range(self.config.num_blocks):
-            if self.block_sigmas[i] <= s <= self.block_sigmas[i + 1]:
-                return i
-        return self.config.num_blocks - 1
-
     def get_weights(self, sigma: torch.Tensor) -> torch.Tensor:
-        """Karras loss weighting."""
         return (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
 
     def shared_step(self, batch, step="train"):
@@ -89,9 +82,10 @@ class DBlockLM(L.LightningModule):
         targets = batch["targets"]      # [B, S]
         B, S = input_ids.shape
 
-        # Target: embedding of next token (the "clean" z)
+        # Target: L2-normalized embedding of next token
         with torch.no_grad():
-            z = self.model.token_emb(targets)  # [B, S, D]
+            z = self.model.token_emb(targets)
+            z = F.normalize(z, p=2, dim=-1)
 
         # Sample sigma from random block
         sigmas, block_idx = self.get_sigmas(B)
@@ -107,14 +101,14 @@ class DBlockLM(L.LightningModule):
         c_in = 1.0 / (sigmas ** 2 + self.sigma_data ** 2) ** 0.5
         c_noise = 0.25 * sigmas.log()
 
-        # Engram injection (at designated iterations)
+        # Engram
         engram_ctx = None
         if self.engram is not None and block_idx in self.config.engram_inject_iterations:
             engram_ctx = self.engram(input_ids, self.model.token_emb(input_ids))
-            engram_ctx = engram_ctx - self.model.token_emb(input_ids)  # residual only
+            engram_ctx = engram_ctx - self.model.token_emb(input_ids)
 
-        # Forward through shared layers
-        logits = self.model(
+        # Forward: interleaved context + noisy target (separate positions)
+        model_out_logits = self.model(
             input_ids=input_ids,
             noisy_z=zt * c_in[:, None, None],
             sigma=c_noise,
@@ -123,9 +117,9 @@ class DBlockLM(L.LightningModule):
 
         # Weighted CE loss
         loss_flat = F.cross_entropy(
-            logits.view(-1, self.config.vocab_size), targets.view(-1), reduction="none"
+            model_out_logits.view(-1, self.config.vocab_size), targets.view(-1), reduction="none"
         )
-        loss_per_sample = loss_flat.view(B, S).mean(dim=1)  # [B]
+        loss_per_sample = loss_flat.view(B, S).mean(dim=1)
         w = self.get_weights(sigmas)
         loss = (loss_per_sample * w).mean()
 
@@ -158,14 +152,14 @@ class DBlockLM(L.LightningModule):
         for i in range(len(sigmas) - 1):
             sigma = sigmas[i].expand(B)
             next_sigma = sigmas[i + 1].expand(B)
-            iteration = i
 
+            c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
+            c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
             c_in = 1.0 / (sigma ** 2 + self.sigma_data ** 2) ** 0.5
             c_noise = 0.25 * sigma.log()
 
-            # Engram at designated iterations
             engram_ctx = None
-            if self.engram is not None and iteration in self.config.engram_inject_iterations:
+            if self.engram is not None and i in self.config.engram_inject_iterations:
                 engram_ctx = self.engram(input_ids, self.model.token_emb(input_ids))
                 engram_ctx = engram_ctx - self.model.token_emb(input_ids)
 
@@ -176,16 +170,19 @@ class DBlockLM(L.LightningModule):
                 engram_ctx=engram_ctx,
             )
 
-            # Soft denoised estimate: logits → probs → expected embedding
+            # Denoised estimate via Karras preconditioner:
+            # D(z) = c_skip * z + c_out * F(z*c_in)
+            # But F outputs logits, so reconstruct embedding: probs @ emb_weight
             probs = F.softmax(logits, dim=-1)
-            denoised = probs @ self.model.token_emb.weight  # [B, S, D]
+            model_emb = probs @ self.model.token_emb.weight  # [B, S, D]
+            denoised = c_skip[:, None, None] * z + c_out[:, None, None] * model_emb
 
             # Euler step
             d = (z - denoised) / sigma[:, None, None]
             dt = (next_sigma - sigma)[:, None, None]
             z = z + dt * d
 
-        # Final step
+        # Final denoise
         final_sigma = sigmas[-1].expand(B)
         c_in = 1.0 / (final_sigma ** 2 + self.sigma_data ** 2) ** 0.5
         c_noise = 0.25 * final_sigma.log()
@@ -225,7 +222,6 @@ class DBlockLM(L.LightningModule):
 
         optimizer = torch.optim.AdamW(param_groups, lr=self.lr, betas=(0.9, 0.95))
 
-        # Separate sparse optimizer for engram table if on CPU
         if engram_table_params:
             self.engram_optimizer = torch.optim.SparseAdam(
                 engram_table_params, lr=self.lr * 0.1

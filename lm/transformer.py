@@ -200,9 +200,9 @@ class CausalTransformer(nn.Module):
         if config.tie_embeddings:
             self.output_head.weight = self.token_emb.weight
 
-        # Precompute RoPE frequencies
+        # Precompute RoPE frequencies (2× for interleaved context+denoise positions)
         rope_cos, rope_sin = precompute_rope_freqs(
-            config.qk_rope_head_dim, config.max_seq_len, config.rope_theta
+            config.qk_rope_head_dim, config.max_seq_len * 2, config.rope_theta
         )
         self.register_buffer("rope_cos", rope_cos, persistent=False)
         self.register_buffer("rope_sin", rope_sin, persistent=False)
@@ -210,26 +210,36 @@ class CausalTransformer(nn.Module):
     def forward(self, input_ids: torch.Tensor, noisy_z: torch.Tensor,
                 sigma: torch.Tensor, engram_ctx: torch.Tensor = None) -> torch.Tensor:
         """
+        Interleaved context + denoising forward pass.
+        Clean context tokens and noisy target tokens occupy SEPARATE positions
+        (like CLS vs patches in the ViT classification case).
+
         input_ids: [B, S] context tokens
         noisy_z:   [B, S, D] noisy target embeddings (scaled by c_in)
         sigma:     [B] c_noise values (0.25 * log(sigma))
         engram_ctx: [B, S, D] optional engram residual (pre-gated)
-        Returns: logits [B, S, V]
+        Returns: logits [B, S, V] (at denoising positions only)
         """
-        x = self.token_emb(input_ids) + noisy_z
+        B, S = input_ids.shape
+        ctx = self.token_emb(input_ids)  # [B, S, D] clean context
         if engram_ctx is not None:
-            x = x + engram_ctx
+            ctx = ctx + engram_ctx
+
+        # Interleave: [ctx_0, z_0, ctx_1, z_1, ...]  → [B, 2S, D]
+        interleaved = torch.stack([ctx, noisy_z], dim=2).view(B, 2 * S, -1)
 
         cond = self.time_emb(sigma)
 
         for layer in self.layers:
             if self.gradient_checkpointing and self.training:
-                x = checkpoint(layer, x, cond, self.rope_cos, self.rope_sin, use_reentrant=False)
+                interleaved = checkpoint(layer, interleaved, cond, self.rope_cos, self.rope_sin, use_reentrant=False)
             else:
-                x = layer(x, cond, self.rope_cos, self.rope_sin)
+                interleaved = layer(interleaved, cond, self.rope_cos, self.rope_sin)
 
-        x = self.final_norm(x)
-        return self.output_head(x)
+        interleaved = self.final_norm(interleaved)
+        # Extract denoising positions (odd indices: 1, 3, 5, ...)
+        denoise_out = interleaved[:, 1::2, :]  # [B, S, D]
+        return self.output_head(denoise_out)
 
     def forward_clean(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Standard forward without denoising (for baseline training)."""
