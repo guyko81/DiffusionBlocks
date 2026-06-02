@@ -4,7 +4,7 @@ import argparse
 from datetime import datetime, timezone, timedelta
 
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar
 from lightning.pytorch.loggers import WandbLogger
 
 from lm.config import LMConfig
@@ -128,6 +128,7 @@ def main():
             every_n_epochs=args.save_every_n_epochs,
         ),
         LearningRateMonitor(logging_interval="step"),
+        TQDMProgressBar(refresh_rate=100),
     ]
 
     # Trainer
