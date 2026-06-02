@@ -4,7 +4,7 @@ import argparse
 from datetime import datetime, timezone, timedelta
 
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, TQDMProgressBar
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, Callback
 from lightning.pytorch.loggers import WandbLogger
 
 from lm.config import LMConfig
@@ -12,7 +12,37 @@ from lm.data_lm import WikiText103DataModule
 from lm.model_lm import DBlockLM, BaselineLM
 
 
+import sys
+
 JST = timezone(timedelta(hours=9))
+
+
+class InlineProgressBar(Callback):
+    def __init__(self, interval=10):
+        self._next = 0
+        self._interval = interval
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        import time
+        now = time.monotonic()
+        if now < self._next:
+            return
+        self._next = now + self._interval
+        epoch = trainer.current_epoch
+        total = trainer.num_training_batches
+        loss = trainer.callback_metrics.get("train/loss", 0)
+        val = trainer.callback_metrics.get("val/loss", float("nan"))
+        pct = 100 * batch_idx / total
+        sys.stdout.write(
+            f"\rEpoch {epoch} [{batch_idx}/{total} {pct:.0f}%] "
+            f"train/loss={loss:.3f} val/loss={val:.3f}   "
+        )
+        sys.stdout.flush()
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        loss = trainer.callback_metrics.get("train/loss", 0)
+        val = trainer.callback_metrics.get("val/loss", float("nan"))
+        print(f"\nEpoch {trainer.current_epoch} done — train/loss={loss:.3f} val/loss={val:.3f}")
 
 
 def main():
@@ -128,7 +158,7 @@ def main():
             every_n_epochs=args.save_every_n_epochs,
         ),
         LearningRateMonitor(logging_interval="step"),
-        TQDMProgressBar(refresh_rate=100),
+        InlineProgressBar(),
     ]
 
     # Trainer
@@ -140,7 +170,7 @@ def main():
         precision=args.precision,
         accumulate_grad_batches=args.accumulate_grad_batches,
         val_check_interval=0.25,
-        enable_progress_bar=True,
+        enable_progress_bar=False,
         default_root_dir="logs",
     )
 
