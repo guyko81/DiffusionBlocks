@@ -31,10 +31,10 @@ class WikiText103DataModule(L.LightningDataModule):
         self.tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
 
     def prepare_data(self):
-        load_dataset("wikitext", "wikitext-103-raw-v1")
+        load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1")
 
     def setup(self, stage=None):
-        ds = load_dataset("wikitext", "wikitext-103-raw-v1")
+        ds = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1")
         self.train_ds = PackedTextDataset(self._tokenize_split(ds["train"]), self.seq_len)
         self.val_ds = PackedTextDataset(self._tokenize_split(ds["validation"]), self.seq_len)
         self.test_ds = PackedTextDataset(self._tokenize_split(ds["test"]), self.seq_len)
