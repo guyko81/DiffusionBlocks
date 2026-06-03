@@ -56,6 +56,10 @@ class DBlockLM(L.LightningModule):
         self.sigma_data = config.sigma_data
         self.gamma = config.gamma
 
+    def on_fit_start(self):
+        if self.engram is not None:
+            self.engram.move_table_to_cpu()
+
     def get_sigmas(self, n_samples: int, p_mean: float = -1.2, p_std: float = 1.2):
         block_idx = random.randint(0, self.config.num_blocks - 1)
         sigma_min_b = self.block_sigmas[block_idx]

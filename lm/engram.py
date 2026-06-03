@@ -59,14 +59,14 @@ class EngramMemory(nn.Module):
 
     def lookup(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Hash → lookup → average over hashes and n-gram orders. Returns [B, S, D]."""
+        target_device = input_ids.device
+        table_device = self.table.weight.device
         results = []
         for order in self.ngram_orders:
             hash_idx = self._hash_ngrams(input_ids, order)  # [B, S, num_hashes]
-            flat = hash_idx.reshape(-1)
-            if self.on_cpu:
-                flat = flat.cpu()
+            flat = hash_idx.reshape(-1).to(table_device)
             embs = self.table(flat)  # [B*S*H, D]
-            embs = embs.to(input_ids.device)
+            embs = embs.to(target_device)
             embs = embs.view(*hash_idx.shape, self.dim)  # [B, S, H, D]
             results.append(embs.mean(dim=2))
         return torch.stack(results).mean(dim=0)  # [B, S, D]
